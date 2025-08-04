@@ -1,0 +1,413 @@
+"""
+Classe GemmaTranscriber pour la transcription audio utilisant le modèle Gemma 3n-E2B.
+Gère la transcription audio-vers-texte avec optimisation pour la langue française.
+"""
+
+import os
+import re
+import logging
+import torch
+import torchaudio
+import numpy as np
+from typing import Optional
+from transformers import AutoProcessor, AutoModel, AutoConfig, AutoTokenizer
+from config import AudioConfig
+
+logger = logging.getLogger(__name__)
+
+
+class GemmaTranscriber:
+    """
+    Classe de transcription audio utilisant le modèle Gemma 3n-E2B.
+    Optimisée pour la transcription en français avec fallback GPU/CPU.
+    """
+
+    def __init__(self, config: Optional[AudioConfig] = None):
+        """
+        Initialise le GemmaTranscriber avec la configuration.
+
+        Args:
+            config: Instance AudioConfig, utilise la configuration par défaut si None
+        """
+        self.config = config or AudioConfig()
+        self.device = self._detect_device()
+        self.model = None
+        self.processor = None
+        self._initialize_model()
+
+    def _detect_device(self) -> str:
+        """
+        Détecte le périphérique disponible (GPU/CPU) pour le traitement.
+
+        Returns:
+            Chaîne du périphérique ('cuda' ou 'cpu')
+        """
+        if self.config.use_gpu and torch.cuda.is_available():
+            device = "cuda"
+            logger.info(
+                f"Using GPU for audio transcription: {torch.cuda.get_device_name()}"
+            )
+        else:
+            device = "cpu"
+            if self.config.use_gpu:
+                logger.warning("GPU requested but not available, falling back to CPU")
+            else:
+                logger.info("Using CPU for audio transcription")
+
+        return device
+
+    def _initialize_model(self) -> None:
+        """
+        Initialize the Gemma 3n-E2B model and processor for audio transcription.
+        """
+        try:
+            logger.info(
+                f"Initializing Gemma 3n-E2B model: {self.config.gemma_model_id}"
+            )
+
+            # Load model configuration
+            model_config = AutoConfig.from_pretrained(
+                self.config.gemma_model_id, trust_remote_code=True
+            )
+
+            # Determine torch dtype based on device
+            torch_dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
+
+            # Load the model - try AutoModel first, then fallback
+            try:
+                self.model = AutoModel.from_pretrained(
+                    self.config.gemma_model_id,
+                    config=model_config,
+                    torch_dtype=torch_dtype,
+                    trust_remote_code=True,
+                    device_map="auto" if self.device == "cuda" else None,
+                )
+            except Exception as model_error:
+                logger.warning(f"AutoModel failed: {model_error}, trying direct import")
+                # Try to import the specific model class
+                from transformers.models.gemma3n import Gemma3nForConditionalGeneration
+
+                self.model = Gemma3nForConditionalGeneratio
+                n.from_pretrained(
+                    self.config.gemma_model_id,
+                    config=model_config,
+                    torch_dtype=torch_dtype,
+                    trust_remote_code=True,
+                    device_map="auto" if self.device == "cuda" else None,
+                )
+
+            if self.device == "cpu":
+                self.model = self.model.to("cpu")
+
+            # Set model to evaluation mode
+            self.model.eval()
+
+            # Load processor (try without authentication first, fallback to basic tokenizer)
+            try:
+                self.processor = AutoProcessor.from_pretrained(
+                    self.config.gemma_model_id, trust_remote_code=True
+                )
+                logger.info("Processor loaded successfully")
+            except Exception as proc_error:
+                logger.warning(f"Could not load full processor: {proc_error}")
+                # Fallback: create a basic processor setup
+                try:
+                    from transformers import AutoTokenizer
+
+                    self.processor = AutoTokenizer.from_pretrained(
+                        self.config.gemma_model_id, trust_remote_code=True
+                    )
+                    logger.info("Using fallback tokenizer as processor")
+                except Exception as tokenizer_error:
+                    logger.error(f"Could not load tokenizer either: {tokenizer_error}")
+                    # Dernier fallback : utiliser un tokenizer générique
+                    try:
+                        from transformers import AutoTokenizer
+
+                        self.processor = AutoTokenizer.from_pretrained(
+                            "google/gemma-2b", trust_remote_code=True
+                        )
+                        logger.warning("Using generic Gemma tokenizer as last resort")
+                    except Exception as final_error:
+                        logger.error(
+                            f"All processor loading attempts failed: {final_error}"
+                        )
+                        self.processor = None
+
+            logger.info("Gemma 3n-E2B model initialized successfully")
+
+        except Exception as e:
+            logger.error(f"Failed to initialize Gemma model: {str(e)}")
+            raise RuntimeError(f"Model initialization failed: {str(e)}")
+
+    def transcribe_audio(self, audio_path: str) -> str:
+        """
+        Transcribe audio file to text using Gemma 3n-E2B model.
+
+        Args:
+            audio_path: Path to the audio file to transcribe
+
+        Returns:
+            Transcribed text as string
+
+        Raises:
+            FileNotFoundError: If audio file doesn't exist
+            RuntimeError: If transcription fails
+        """
+        if not os.path.exists(audio_path):
+            raise FileNotFoundError(f"Audio file not found: {audio_path}")
+
+        try:
+            logger.info(f"Starting transcription of audio file: {audio_path}")
+
+            # Vérifier que le processor est disponible
+            if self.processor is None:
+                raise RuntimeError(
+                    "Processor not initialized - cannot perform transcription"
+                )
+
+            # Load and preprocess audio for Gemma 3n-E2B
+            audio_features = self._preprocess_audio(audio_path)
+
+            # Create the prompt for transcription
+            prompt = "Transcris cet audio en français:"
+
+            # Process inputs
+            if hasattr(self.processor, "process_audio"):
+                # Full processor available
+                inputs = self.processor(
+                    text=prompt, audio=audio_features, return_tensors="pt"
+                )
+            else:
+                # Fallback: manual processing
+                inputs = self._manual_process_inputs(prompt, audio_features)
+
+            # Move inputs to device
+            inputs = {
+                k: v.to(self.device) if isinstance(v, torch.Tensor) else v
+                for k, v in inputs.items()
+            }
+
+            # Generate transcription
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=512,
+                    do_sample=False,
+                    temperature=0.1,
+                    pad_token_id=(
+                        self.processor.eos_token_id
+                        if hasattr(self.processor, "eos_token_id")
+                        else 0
+                    ),
+                )
+
+            # Decode the generated text
+            if hasattr(self.processor, "decode"):
+                # Skip the input tokens to get only the generated response
+                input_length = (
+                    inputs["input_ids"].shape[1] if "input_ids" in inputs else 0
+                )
+                generated_tokens = outputs[0][input_length:]
+                raw_text = self.processor.decode(
+                    generated_tokens, skip_special_tokens=True
+                )
+            else:
+                # Fallback decoding
+                raw_text = self._manual_decode(outputs[0])
+
+            # Clean and format the transcribed text
+            cleaned_text = self.cleanup_and_format_text(raw_text)
+
+            logger.info(
+                f"Transcription completed successfully. Text length: {len(cleaned_text)} characters"
+            )
+            return cleaned_text
+
+        except Exception as e:
+            logger.error(f"Transcription failed for {audio_path}: {str(e)}")
+            raise RuntimeError(f"Audio transcription failed: {str(e)}")
+
+    def _preprocess_audio(self, audio_path: str) -> torch.Tensor:
+        """
+        Preprocess audio file for Gemma 3n-E2B model.
+
+        Args:
+            audio_path: Path to the audio file
+
+        Returns:
+            Preprocessed audio tensor
+        """
+        try:
+            # Load audio file
+            waveform, sample_rate = torchaudio.load(audio_path)
+
+            # Convert to mono if stereo
+            if waveform.shape[0] > 1:
+                waveform = torch.mean(waveform, dim=0, keepdim=True)
+
+            # Resample to 16kHz (standard for speech models)
+            target_sample_rate = 16000
+            if sample_rate != target_sample_rate:
+                resampler = torchaudio.transforms.Resample(
+                    sample_rate, target_sample_rate
+                )
+                waveform = resampler(waveform)
+
+            # Normalize audio
+            waveform = waveform / torch.max(torch.abs(waveform))
+
+            # Convert to the expected format for Gemma 3n-E2B
+            # The model expects audio features, not raw waveform
+            # We'll use a simple mel spectrogram approach
+            mel_spectrogram = torchaudio.transforms.MelSpectrogram(
+                sample_rate=target_sample_rate,
+                n_mels=128,  # Based on the audio config we saw earlier
+                hop_length=160,
+                win_length=400,
+            )
+
+            audio_features = mel_spectrogram(waveform)
+
+            # Convert to log scale
+            audio_features = torch.log(audio_features + 1e-9)
+
+            # Transpose to get (time, features) format
+            audio_features = audio_features.squeeze(0).transpose(0, 1)
+
+            logger.debug(f"Audio preprocessed: shape {audio_features.shape}")
+            return audio_features
+
+        except Exception as e:
+            logger.error(f"Audio preprocessing failed: {str(e)}")
+            raise RuntimeError(f"Audio preprocessing failed: {str(e)}")
+
+    def _manual_process_inputs(self, prompt: str, audio_features: torch.Tensor) -> dict:
+        """
+        Manually process inputs when full processor is not available.
+
+        Args:
+            prompt: Text prompt
+            audio_features: Preprocessed audio features
+
+        Returns:
+            Dictionary of processed inputs
+        """
+        try:
+            # Vérifier si le processor est disponible
+            if self.processor is None:
+                logger.error("Processor is None, cannot tokenize text")
+                raise RuntimeError("Processor not initialized")
+
+            # Tokenize the text prompt
+            text_inputs = self.processor(
+                prompt, return_tensors="pt", padding=True, truncation=True
+            )
+
+            # For Gemma 3n-E2B, we need to combine text and audio inputs
+            # This is a simplified approach - in practice, the model might need
+            # more sophisticated input formatting
+            inputs = {
+                "input_ids": text_inputs["input_ids"],
+                "attention_mask": text_inputs["attention_mask"],
+                "audio_features": audio_features.unsqueeze(0),  # Add batch dimension
+            }
+
+            return inputs
+
+        except Exception as e:
+            logger.error(f"Manual input processing failed: {str(e)}")
+            raise RuntimeError(f"Input processing failed: {str(e)}")
+
+    def _manual_decode(self, output_tokens: torch.Tensor) -> str:
+        """
+        Manually decode output tokens when full processor is not available.
+
+        Args:
+            output_tokens: Generated token IDs
+
+        Returns:
+            Decoded text string
+        """
+        try:
+            # Use the tokenizer to decode
+            decoded_text = self.processor.decode(
+                output_tokens, skip_special_tokens=True
+            )
+            return decoded_text
+
+        except Exception as e:
+            logger.error(f"Manual decoding failed: {str(e)}")
+            raise RuntimeError(f"Decoding failed: {str(e)}")
+
+    def cleanup_and_format_text(self, raw_text: str) -> str:
+        """
+        Clean and format the raw transcribed text.
+
+        Args:
+            raw_text: Raw text from transcription
+
+        Returns:
+            Cleaned and formatted text
+        """
+        if not raw_text or not raw_text.strip():
+            return ""
+
+        # Remove leading/trailing whitespace
+        text = raw_text.strip()
+
+        # Remove common transcription artifacts
+        text = re.sub(r"\[.*?\]", "", text)  # Remove bracketed content
+        text = re.sub(r"\(.*?\)", "", text)  # Remove parenthetical content
+        text = re.sub(r"<.*?>", "", text)  # Remove angle bracketed content
+
+        # Remove multiple consecutive spaces (after artifact removal)
+        text = re.sub(r"\s+", " ", text)
+
+        # Fix common French punctuation issues
+        text = re.sub(r"\s+([,.!?;:])", r"\1", text)  # Remove space before punctuation
+        text = re.sub(r"([,.!?;:])\s*", r"\1 ", text)  # Ensure space after punctuation
+
+        # Capitalize first letter of sentences
+        sentences = re.split(r"([.!?]+\s*)", text)
+        formatted_sentences = []
+
+        for i, sentence in enumerate(sentences):
+            if i % 2 == 0 and sentence.strip():  # Actual sentence content
+                sentence = sentence.strip()
+                if sentence:
+                    sentence = (
+                        sentence[0].upper() + sentence[1:]
+                        if len(sentence) > 1
+                        else sentence.upper()
+                    )
+                formatted_sentences.append(sentence)
+            elif sentence.strip():  # Punctuation with potential spaces
+                formatted_sentences.append(sentence.rstrip() + " ")
+
+        text = "".join(formatted_sentences).strip()
+
+        # Final cleanup
+        text = text.strip()
+
+        # Ensure text ends with proper punctuation
+        if text and not text[-1] in ".!?":
+            text += "."
+
+        logger.debug(
+            f"Text cleanup completed. Original length: {len(raw_text)}, Final length: {len(text)}"
+        )
+        return text
+
+    def __del__(self):
+        """
+        Cleanup resources when object is destroyed.
+        """
+        if hasattr(self, "model") and self.model is not None:
+            # Clear GPU memory if using CUDA
+            if self.device == "cuda":
+                torch.cuda.empty_cache()
+
+        # Clean up model and processor references
+        self.model = None
+        self.processor = None

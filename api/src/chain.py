@@ -17,6 +17,7 @@ from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_milvus import Milvus
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.llms import Ollama
 
 from src.utils import compute_similarity, delete_unused_sources
 import concurrent.futures
@@ -25,10 +26,9 @@ class Retriever:
     def __init__(self, config, prompt: str, data_source: str):
         self.config = config
         self.embedding_model = OpenAIEmbeddings(api_key=config.OPENAI_API_KEY)
-        self.llm = ChatOpenAI(
-            model="chatgpt-4o-latest",
-            temperature=0.4,
-            openai_api_key=config.OPENAI_API_KEY,
+        self.llm = Ollama(
+            model="gemma3:4b",
+            temperature=0.4
         )
         self.prompt_template = PromptTemplate(
             template=prompt,
@@ -112,8 +112,8 @@ class Retriever:
         
     def create_retriever_for_source(self, source, top_k: int = 100, similarity_threshold: float = 0.4, expr: str = None):
         vectorstore = self.create_vectorstore(source)
-        compressor = DocumentCompressorPipeline(
-            transformers=[EmbeddingsRedundantFilter(embeddings=self.embedding_model, similarity_threshold=1)])
+        # compressor = DocumentCompressorPipeline(
+        #     transformers=[EmbeddingsRedundantFilter(embeddings=self.embedding_model, similarity_threshold=1)])
         
         retriever = vectorstore.as_retriever(
             search_type="similarity",
@@ -313,24 +313,19 @@ class Retriever:
 
 
 def create_llm(
-    api_key,
     model,
     temperature,
     max_retries,
-    streaming: bool = False,
     callbacks: list = [],
-) -> ChatOpenAI:
-    """Create and configure Azure Chat OpenAI instance."""
-    return ChatOpenAI(
-        api_key=api_key,  # type: ignore
+) -> Ollama:
+    return Ollama(  
         model=model,
         temperature=temperature,
-        streaming=streaming,
         callbacks=callbacks,
     ).with_retry(
         wait_exponential_jitter=True,
         stop_after_attempt=max_retries,
-    )  # type: ignore
+    ) 
 
 
 def answer_chain(
@@ -351,7 +346,11 @@ def answer_chain(
     answer = chain.invoke({"context": context, "query": query})
     answer = re.split(r"(-{3,})", answer)[0]
     documents = delete_unused_sources(answer, docs)
-    return answer, documents
+    
+    return {
+        "documents": documents,
+        "answer": answer,
+    }
 
 
 def start_generation(chain, context, query):
