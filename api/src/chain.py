@@ -17,6 +17,7 @@ from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_milvus import Milvus
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.llms import Ollama
 
 from src.utils import compute_similarity, delete_unused_sources
@@ -25,7 +26,7 @@ import concurrent.futures
 class Retriever:
     def __init__(self, config, prompt: str, data_source: str):
         self.config = config
-        self.embedding_model = OpenAIEmbeddings(api_key=config.OPENAI_API_KEY)
+        self.embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
         self.llm = Ollama(
             model="gemma3:4b",
             temperature=0.4
@@ -50,20 +51,15 @@ class Retriever:
 
     def get_legal_fields(self, source: str):
         legal_fields = []
-        if source == "labor_law":
-            legal_fields.append("droit du travail")
-        elif source == "national_transport":
-            legal_fields.append("droit du transport")
-        elif source == "insurance":
+        if source == "insurance":
             legal_fields.append("droit des assurances")
         elif source == "uemoa":
             legal_fields.append("réglementation uemoa")
         elif source == "ohada":
             legal_fields.append("réglementation ohada")
-        elif source == "digital_legislation":
-            legal_fields.append("droit numérique")
         elif source == "jurisprudence":
             legal_fields.append("jurisprudence")
+            
         return {"legal_field": ", ".join(legal_fields)}
 
     def orchestrator(self, llm_output: str, source: str) -> dict:
@@ -112,8 +108,8 @@ class Retriever:
         
     def create_retriever_for_source(self, source, top_k: int = 100, similarity_threshold: float = 0.4, expr: str = None):
         vectorstore = self.create_vectorstore(source)
-        # compressor = DocumentCompressorPipeline(
-        #     transformers=[EmbeddingsRedundantFilter(embeddings=self.embedding_model, similarity_threshold=1)])
+        compressor = DocumentCompressorPipeline(
+            transformers=[EmbeddingsRedundantFilter(embeddings=self.embedding_model, similarity_threshold=1)])
         
         retriever = vectorstore.as_retriever(
             search_type="similarity",
@@ -249,7 +245,7 @@ class Retriever:
     def filter_and_prioritize_sources(self, docs: list[Document], top_k: int) -> list[Document]:
             final_docs = []
             jurisprudence_count = 0
-            max_jurisprudence = 7
+            max_jurisprudence = 3
             for doc in docs:
                 is_jurisprudence = 'jurisprudence' in doc.metadata.get('legal_field', '').lower()
                 if is_jurisprudence:
@@ -266,7 +262,6 @@ class Retriever:
         return self.retrieve_docs_from_source(query, source, top_k, similarity_threshold, expr)
     
     async def _retrieve_for_single_source_async(self, query: str, source: str, llm_output: str, top_k: int, similarity_threshold: float) -> list[Document]:
-        print("ok")
         return await asyncio.to_thread(
             self._retrieve_for_single_source,
             query,
@@ -311,6 +306,26 @@ class Retriever:
         context = self.format_docs(docs, max_context_size=100_000, separator="\n\n")
         return context, docs
 
+
+# def create_llm(
+#     api_key,
+#     model,
+#     temperature,
+#     max_retries,
+#     streaming: bool = False,
+#     callbacks: list = [],
+# ) -> ChatOpenAI:
+#     """Create and configure Azure Chat OpenAI instance."""
+#     return ChatOpenAI(
+#         api_key=api_key,  # type: ignore
+#         model=model,
+#         temperature=temperature,
+#         streaming=streaming,
+#         callbacks=callbacks,
+#     ).with_retry(
+#         wait_exponential_jitter=True,
+#         stop_after_attempt=max_retries,
+#     )  # type: ignore
 
 def create_llm(
     model,

@@ -12,7 +12,7 @@ COLLECTION_NAMES = {
     "jurisprudence": "jurisprudence"
 }
 
-CONNECTION_ARGS = {"host": venv.get("HOST"), "port": venv.get("PORT")}
+CONNECTION_ARGS = {"db_name": venv.get("ALIAS"), "host": venv.get("HOST"), "port": venv.get("PORT")}
 INDEX_PARAMS = {
     "metric_type": "COSINE",
     "index_type": "HNSW",

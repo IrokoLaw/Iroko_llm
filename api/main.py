@@ -62,9 +62,7 @@ def get_local_model_path(model_name: str) -> str:
 class Models(Enum):
     """Models available for IrokoAPI."""
 
-    CHATGPT = "chatgpt-4o-latest"
-    GPT4o = "gpt-4o-2024-11-20"
-    GPT4o_mini = "gpt-4o-mini-2024-07-18"
+    GEMMA_3N = "gemma3:4b"
 
 
 app = FastAPI(
@@ -246,7 +244,7 @@ def question_answering(
             title="Select OpenAI model",
             description="Select OpenAI model you want to use.",
         ),
-    ] = Models.CHATGPT,
+    ] = Models.GEMMA_3N,
     temperature: Annotated[
         float,
         Query(
@@ -362,7 +360,7 @@ def stream_question_answering(
             title="Select OpenAI model",
             description="Select OpenAI model you want to use.",
         ),
-    ] = Models.CHATGPT,
+    ] = Models.GEMMA_3N,
     temperature: Annotated[
         float,
         Query(
@@ -416,7 +414,6 @@ def stream_question_answering(
     # Creating an object of custom handler
     stream_handler = StreamingHandler(streamer_queue)
     llm = create_llm(
-        api_key=config.OPENAI_API_KEY,
         model=model,
         temperature=temperature,
         max_retries=config.NUM_RETRY,
