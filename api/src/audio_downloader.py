@@ -120,53 +120,22 @@ class AudioDownloader:
             )
 
     def validate_audio_format(self, file_path: str) -> bool:
-        """
-        Validate that the file is a supported audio format using librosa
-
-        Args:
-            file_path: Path to the audio file to validate
-
-        Returns:
-            bool: True if format is valid and supported
-
-        Raises:
-            AudioFormatError: If format is not supported or file is corrupted
-        """
         try:
-            # Check file extension first
-            file_extension = Path(file_path).suffix.lower().lstrip(".")
-            if file_extension not in self.supported_formats:
-                raise AudioFormatError(
-                    f"Format non supporté: {file_extension}. "
-                    f"Formats supportés: {', '.join(self.supported_formats)}"
-                )
-
-            # Try to load audio file with librosa to validate format
-            try:
-                # Load just a small portion to validate format without loading entire file
-                y, sr = librosa.load(file_path, duration=1.0, sr=None)
-
-                # Basic validation checks
-                if len(y) == 0:
-                    raise AudioFormatError("Fichier audio vide ou corrompu")
-
-                if sr <= 0:
-                    raise AudioFormatError("Taux d'échantillonnage invalide")
-
-                logger.info(
-                    f"Format audio validé: {file_extension}, {sr}Hz, {len(y)} échantillons"
-                )
-                return True
-
-            except librosa.LibrosaError as e:
-                raise AudioFormatError(
-                    f"Fichier audio corrompu ou format invalide: {str(e)}"
-                )
-
+            # Vérifie d'abord l'extension
+            ext = Path(file_path).suffix.lower()[1:]
+            if ext not in self.supported_formats:
+                raise AudioFormatError(f"Format {ext} non supporté")
+                
+            # Si c'est un OGG, on convertit
+            if ext == 'ogg':
+                file_path = self.convert_to_mp3(file_path)
+                
+            # Validation avec librosa
+            y, sr = librosa.load(file_path, sr=None, duration=1.0)
+            return True
+            
         except Exception as e:
-            if isinstance(e, AudioFormatError):
-                raise
-            raise AudioFormatError(f"Erreur lors de la validation du format: {str(e)}")
+            raise AudioFormatError(f"Validation échouée: {str(e)}")
 
     def cleanup_temp_file(self, file_path: str) -> None:
         """
@@ -213,3 +182,23 @@ class AudioDownloader:
             return extension
         except Exception:
             return ".mp3"
+
+    def convert_to_mp3(self, input_path: str) -> str:
+        """Convertit un fichier audio en MP3 standard"""
+        try:
+            import subprocess
+            output_path = input_path + ".converted.mp3"
+            
+            subprocess.run([
+                'ffmpeg',
+                '-i', input_path,
+                '-acodec', 'libmp3lame',
+                '-ac', '1',  # Mono
+                '-ar', '16000',  # 16kHz
+                '-q:a', '2',  # Qualité moyenne
+                output_path
+            ], check=True)
+            
+            return output_path
+        except Exception as e:
+            raise AudioFormatError(f"Conversion en MP3 échouée: {str(e)}")

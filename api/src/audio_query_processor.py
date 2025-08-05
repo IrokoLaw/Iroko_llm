@@ -10,7 +10,7 @@ from typing import Optional
 from config import AudioConfig
 from src.audio_detector import AudioDetector
 from src.audio_downloader import AudioDownloader, AudioDownloadError, AudioFormatError
-from src.gemma_transcriber import GemmaTranscriber
+from src.gemma_transcriber import GemmaAudioTranscriber
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ class AudioQueryProcessor:
         config: Optional[AudioConfig] = None,
         detector: Optional[AudioDetector] = None,
         downloader: Optional[AudioDownloader] = None,
-        transcriber: Optional[GemmaTranscriber] = None,
+        transcriber: Optional[GemmaAudioTranscriber] = None,
     ):
         """
         Initialize AudioQueryProcessor with components and configuration.
@@ -59,7 +59,7 @@ class AudioQueryProcessor:
             config: AudioConfig instance, uses default if None
             detector: AudioDetector instance, creates new if None
             downloader: AudioDownloader instance, creates new if None
-            transcriber: GemmaTranscriber instance, creates new if None
+            transcriber: GemmaAudioTranscriber instance, creates new if None
         """
         self.config = config or AudioConfig()
         self.detector = detector or AudioDetector()
@@ -67,7 +67,7 @@ class AudioQueryProcessor:
             max_size_mb=self.config.max_file_size_mb,
             timeout_seconds=self.config.download_timeout_seconds,
         )
-        self.transcriber = transcriber or GemmaTranscriber(self.config)
+        self.transcriber = transcriber or GemmaAudioTranscriber(self.config)
 
     def process_query(self, query: str) -> str:
         """
@@ -158,7 +158,7 @@ class AudioQueryProcessor:
             raise
 
         except RuntimeError as e:
-            # GemmaTranscriber raises RuntimeError for transcription failures
+            # GemmaAudioTranscriber raises RuntimeError for transcription failures
             logger.error(f"Audio transcription failed: {str(e)}")
             raise AudioTranscriptionError(str(e))
 
@@ -218,3 +218,56 @@ class AudioQueryProcessor:
             int: Maximum file size in MB
         """
         return self.config.max_file_size_mb
+
+def transcribe_audio(self, audio_url: str) -> str:
+    """Transcription complète avec gestion des URLs"""
+    try:
+        import requests
+        from io import BytesIO
+        import tempfile
+        
+        # 1. Téléchargement
+        response = requests.get(audio_url, timeout=10)
+        audio_data = BytesIO(response.content)
+        
+        # 2. Conversion en waveform
+        with tempfile.NamedTemporaryFile(suffix=".wav") as tmp:
+            tmp.write(audio_data.read())
+            waveform, sr = torchaudio.load(tmp.name)
+            
+            if sr != 16000:
+                waveform = torchaudio.functional.resample(waveform, sr, 16000)
+        
+        # 3. Préparation du prompt multimédia
+        messages = [
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": "Vous êtes un assistant juridique francophone."}]
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "audio", "audio": waveform.squeeze().numpy()},
+                    {"type": "text", "text": "Transcris précisément cet audio en français:"}
+                ]
+            }
+        ]
+        
+        # 4. Génération
+        inputs = self.processor.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            return_tensors="pt"
+        ).to(self.device)
+        
+        outputs = self.model.generate(
+            inputs,
+            max_new_tokens=500,
+            temperature=0.1  # Réduit les hallucinations
+        )
+        
+        return self.processor.decode(outputs[0], skip_special_tokens=True)
+        
+    except Exception as e:
+        logger.error(f"Transcription error: {str(e)}")
+        raise RuntimeError("Échec de la transcription audio")

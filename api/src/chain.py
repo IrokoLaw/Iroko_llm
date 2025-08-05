@@ -7,17 +7,20 @@ from threading import Thread
 import re
 import numpy as np
 import tiktoken
+import torch
 from langchain.prompts import PromptTemplate
 from langchain.retrievers import ContextualCompressionRetriever
 from langchain.retrievers.document_compressors import (
     DocumentCompressorPipeline,  # type: ignore
 )
 from langchain_community.document_transformers import EmbeddingsRedundantFilter
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_milvus import Milvus
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.llms import Ollama
+from transformers import AutoProcessor, AutoModelForImageTextToText
 
 from src.utils import compute_similarity, delete_unused_sources
 import concurrent.futures
@@ -25,7 +28,10 @@ import concurrent.futures
 class Retriever:
     def __init__(self, config, prompt: str, data_source: str):
         self.config = config
-        self.embedding_model = OpenAIEmbeddings(api_key=config.OPENAI_API_KEY)
+        self.embedding_model = EmbeddingsRedundantFilter("sentence-transformers/all-MiniLM-L6-v2")
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model_name = "google/gemma-3n-e2b-it"
+        self.processor, self.model = self._initialize_model()
         self.llm = Ollama(
             model="gemma3:4b",
             temperature=0.4
@@ -36,6 +42,33 @@ class Retriever:
             partial_variables={"data_source": data_source},
         )
         self.pipeline = self.prompt_template | self.llm
+
+    def _initialize_model(self):
+        """Initialisation avec gestion mémoire optimisée"""
+        logger.info(f"Loading {self.model_name} on {self.device}")
+        
+        # Configuration pour gérer la mémoire limitée
+        processor = AutoProcessor.from_pretrained(self.model_name)
+        
+        # Options pour systèmes avec RAM limitée
+        if self.device == "cpu":
+            model = AutoModelForImageTextToText.from_pretrained(
+                self.model_name,
+                torch_dtype=torch.float32,
+                device_map=None,  # Pas de device_map automatique
+                low_cpu_mem_usage=True,  # Optimisation mémoire CPU
+                load_in_8bit=False,  # Pas de quantification sur CPU
+            )
+        else:
+            # Pour GPU avec mémoire limitée
+            model = AutoModelForImageTextToText.from_pretrained(
+                self.model_name,
+                torch_dtype=torch.float16,
+                device_map="balanced_low_0",  # Distribution équilibrée
+                load_in_8bit=True,  # Quantification 8-bit pour économiser
+            )
+        
+        return processor, model
 
     def get_llm_output(self, query: str) -> str:
         result = self.pipeline.invoke({"query": query})
@@ -112,8 +145,8 @@ class Retriever:
         
     def create_retriever_for_source(self, source, top_k: int = 100, similarity_threshold: float = 0.4, expr: str = None):
         vectorstore = self.create_vectorstore(source)
-        # compressor = DocumentCompressorPipeline(
-        #     transformers=[EmbeddingsRedundantFilter(embeddings=self.embedding_model, similarity_threshold=1)])
+        compressor = DocumentCompressorPipeline(
+             transformers=[EmbeddingsRedundantFilter(embeddings=self.embedding_model, similarity_threshold=1)])
         
         retriever = vectorstore.as_retriever(
             search_type="similarity",
