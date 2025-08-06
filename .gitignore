@@ -118,3 +118,6 @@ history.csv
 volumes/
 notebooks
 tests
+model
+test.ipynb
+README_AUDIO.md

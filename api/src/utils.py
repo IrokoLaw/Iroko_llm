@@ -20,9 +20,12 @@ def get_answer_citations(answer: str) -> list[int]:
 def delete_unused_sources(answer, docs) -> list[dict[str, str]]:
     effective = get_answer_citations(answer)
     documents = []
+
     for i in effective:
-        doc = docs[i - 1]
-        doc = doc.metadata
-        doc.update({"id": str(i)})
-        documents.append(doc)
+        if 1 <= i <= len(docs):  # Vérifie si l'index est dans la plage valide
+            doc = docs[i - 1]
+            doc = doc.metadata
+            doc.update({"id": str(i)})
+            documents.append(doc)
+
     return documents

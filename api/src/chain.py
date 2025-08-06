@@ -17,18 +17,20 @@ from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_milvus import Milvus
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.llms import Ollama
 
 from src.utils import compute_similarity, delete_unused_sources
 import concurrent.futures
+import logger
 
 class Retriever:
     def __init__(self, config, prompt: str, data_source: str):
         self.config = config
-        self.embedding_model = OpenAIEmbeddings(api_key=config.OPENAI_API_KEY)
-        self.llm = ChatOpenAI(
-            model="chatgpt-4o-latest",
-            temperature=0.4,
-            openai_api_key=config.OPENAI_API_KEY,
+        self.embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        self.llm = Ollama(
+            model="gemma3n:e2b-it-q8_0",
+            temperature=0.4
         )
         self.prompt_template = PromptTemplate(
             template=prompt,
@@ -41,7 +43,10 @@ class Retriever:
         result = self.pipeline.invoke({"query": query})
         return result.content if hasattr(result, "content") else str(result)
 
+
+
     def parse_llm_output(self, llm_output: str) -> dict:
+        print(llm_output)
         match = re.search(r'\{.*\}', llm_output, re.DOTALL)
         if not match:
             raise ValueError("JSON introuvable dans la sortie")
@@ -50,20 +55,15 @@ class Retriever:
 
     def get_legal_fields(self, source: str):
         legal_fields = []
-        if source == "labor_law":
-            legal_fields.append("droit du travail")
-        elif source == "national_transport":
-            legal_fields.append("droit du transport")
-        elif source == "insurance":
+        if source == "insurance":
             legal_fields.append("droit des assurances")
         elif source == "uemoa":
             legal_fields.append("réglementation uemoa")
         elif source == "ohada":
             legal_fields.append("réglementation ohada")
-        elif source == "digital_legislation":
-            legal_fields.append("droit numérique")
         elif source == "jurisprudence":
             legal_fields.append("jurisprudence")
+            
         return {"legal_field": ", ".join(legal_fields)}
 
     def orchestrator(self, llm_output: str, source: str) -> dict:
@@ -249,7 +249,7 @@ class Retriever:
     def filter_and_prioritize_sources(self, docs: list[Document], top_k: int) -> list[Document]:
             final_docs = []
             jurisprudence_count = 0
-            max_jurisprudence = 7
+            max_jurisprudence = 3
             for doc in docs:
                 is_jurisprudence = 'jurisprudence' in doc.metadata.get('legal_field', '').lower()
                 if is_jurisprudence:
@@ -266,7 +266,6 @@ class Retriever:
         return self.retrieve_docs_from_source(query, source, top_k, similarity_threshold, expr)
     
     async def _retrieve_for_single_source_async(self, query: str, source: str, llm_output: str, top_k: int, similarity_threshold: float) -> list[Document]:
-        print("ok")
         return await asyncio.to_thread(
             self._retrieve_for_single_source,
             query,
@@ -312,25 +311,40 @@ class Retriever:
         return context, docs
 
 
+# def create_llm(
+#     api_key,
+#     model,
+#     temperature,
+#     max_retries,
+#     streaming: bool = False,
+#     callbacks: list = [],
+# ) -> ChatOpenAI:
+#     """Create and configure Azure Chat OpenAI instance."""
+#     return ChatOpenAI(
+#         api_key=api_key,  # type: ignore
+#         model=model,
+#         temperature=temperature,
+#         streaming=streaming,
+#         callbacks=callbacks,
+#     ).with_retry(
+#         wait_exponential_jitter=True,
+#         stop_after_attempt=max_retries,
+#     )  # type: ignore
+
 def create_llm(
-    api_key,
     model,
     temperature,
     max_retries,
-    streaming: bool = False,
     callbacks: list = [],
-) -> ChatOpenAI:
-    """Create and configure Azure Chat OpenAI instance."""
-    return ChatOpenAI(
-        api_key=api_key,  # type: ignore
+) -> Ollama:
+    return Ollama(  
         model=model,
         temperature=temperature,
-        streaming=streaming,
         callbacks=callbacks,
     ).with_retry(
         wait_exponential_jitter=True,
         stop_after_attempt=max_retries,
-    )  # type: ignore
+    ) 
 
 
 def answer_chain(
@@ -340,7 +354,7 @@ def answer_chain(
     llm,
     retriever: Retriever,
     similarity_threshold: float = 0.4,
-    top_k: int = 200,
+    top_k: int = 30,
 ) -> tuple[str, list[dict[str, str]]]:
     """Get the chain for the given retriever, prompt, and model."""
 
@@ -351,7 +365,11 @@ def answer_chain(
     answer = chain.invoke({"context": context, "query": query})
     answer = re.split(r"(-{3,})", answer)[0]
     documents = delete_unused_sources(answer, docs)
-    return answer, documents
+    
+    return {
+        "documents": documents,
+        "answer": answer,
+    }
 
 
 def start_generation(chain, context, query):
@@ -386,7 +404,7 @@ async def stream_answer_chain(chain, context, query, docs, streamer_queue):
         # guard to make sure we are not extracting anything from
         # empty queue
 
-        await asyncio.sleep(0.03)
+        await asyncio.sleep(0.0001)
         
     documents = delete_unused_sources(collected_answer, docs)
     yield END_GENERATION_TOKEN + json.dumps({"source": documents})
