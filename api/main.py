@@ -10,12 +10,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from langchain_openai.chat_models import ChatOpenAI
+from langchain_community.llms import Ollama
 
 import config
 from fields import Sources, source_list
 from src.chain import Retriever, answer_chain, create_llm, stream_answer_chain
 from src.handlers import StreamingHandler
-from src.prompts import qa_prompt, prompt, data_source
+from src.prompts import qa_prompt, prompt, data_source, iroko_prompt
 from src.audio_query_processor import (
     AudioQueryProcessor,
     AudioProcessingError,
@@ -62,9 +63,7 @@ def get_local_model_path(model_name: str) -> str:
 class Models(Enum):
     """Models available for IrokoAPI."""
 
-    CHATGPT = "chatgpt-4o-latest"
-    GPT4o = "gpt-4o-2024-11-20"
-    GPT4o_mini = "gpt-4o-mini-2024-07-18"
+    GEMMA_3N = "gemma3n:e2b-it-q8_0"
 
 
 app = FastAPI(
@@ -246,7 +245,7 @@ def question_answering(
             title="Select OpenAI model",
             description="Select OpenAI model you want to use.",
         ),
-    ] = Models.CHATGPT,
+    ] = Models.GEMMA_3N,
     temperature: Annotated[
         float,
         Query(
@@ -295,8 +294,11 @@ def question_answering(
     processed_query = preprocess_query(query)
     is_audio_input = audio_processor and audio_processor.is_audio_query(original_query)
 
-    llm = ChatOpenAI(
-        model=model.value, temperature=temperature, openai_api_key=config.OPENAI_API_KEY
+    # llm = ChatOpenAI(
+    #     model=model.value, temperature=temperature, openai_api_key=config.OPENAI_API_KEY
+    # )
+    llm = Ollama(
+        model=model.value, temperature=temperature
     )
     retriever = Retriever(config=config, prompt=prompt, data_source=data_source)
     source_list = [s.value for s in sources]
@@ -315,7 +317,7 @@ def question_answering(
     answer, documents = answer_chain(
         processed_query,
         source_list,
-        qa_prompt,
+        iroko_prompt,
         llm,
         retriever,
         similarity_threshold,
@@ -362,7 +364,7 @@ def stream_question_answering(
             title="Select OpenAI model",
             description="Select OpenAI model you want to use.",
         ),
-    ] = Models.CHATGPT,
+    ] = Models.GEMMA_3N,
     temperature: Annotated[
         float,
         Query(
@@ -416,11 +418,9 @@ def stream_question_answering(
     # Creating an object of custom handler
     stream_handler = StreamingHandler(streamer_queue)
     llm = create_llm(
-        api_key=config.OPENAI_API_KEY,
         model=model,
         temperature=temperature,
         max_retries=config.NUM_RETRY,
-        streaming=True,
         callbacks=[stream_handler],
     )
     retriever = Retriever(config=config, prompt=prompt, data_source=data_source)
@@ -441,7 +441,7 @@ def stream_question_answering(
             processed_query, source_list, top_k, similarity_threshold
         )
     )
-    chain = qa_prompt | llm
+    chain = iroko_prompt | llm
 
     response = StreamingResponse(
         stream_answer_chain(chain, context, processed_query, docs, streamer_queue),

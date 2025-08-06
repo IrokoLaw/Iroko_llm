@@ -7,33 +7,29 @@ from threading import Thread
 import re
 import numpy as np
 import tiktoken
-import torch
 from langchain.prompts import PromptTemplate
 from langchain.retrievers import ContextualCompressionRetriever
 from langchain.retrievers.document_compressors import (
     DocumentCompressorPipeline,  # type: ignore
 )
 from langchain_community.document_transformers import EmbeddingsRedundantFilter
-from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_milvus import Milvus
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.llms import Ollama
-from transformers import AutoProcessor, AutoModelForImageTextToText
 
 from src.utils import compute_similarity, delete_unused_sources
 import concurrent.futures
+import logger
 
 class Retriever:
     def __init__(self, config, prompt: str, data_source: str):
         self.config = config
-        self.embedding_model = EmbeddingsRedundantFilter("sentence-transformers/all-MiniLM-L6-v2")
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model_name = "google/gemma-3n-e2b-it"
-        self.processor, self.model = self._initialize_model()
+        self.embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
         self.llm = Ollama(
-            model="gemma3:4b",
+            model="gemma3n:e2b-it-q8_0",
             temperature=0.4
         )
         self.prompt_template = PromptTemplate(
@@ -43,38 +39,14 @@ class Retriever:
         )
         self.pipeline = self.prompt_template | self.llm
 
-    def _initialize_model(self):
-        """Initialisation avec gestion mémoire optimisée"""
-        logger.info(f"Loading {self.model_name} on {self.device}")
-        
-        # Configuration pour gérer la mémoire limitée
-        processor = AutoProcessor.from_pretrained(self.model_name)
-        
-        # Options pour systèmes avec RAM limitée
-        if self.device == "cpu":
-            model = AutoModelForImageTextToText.from_pretrained(
-                self.model_name,
-                torch_dtype=torch.float32,
-                device_map=None,  # Pas de device_map automatique
-                low_cpu_mem_usage=True,  # Optimisation mémoire CPU
-                load_in_8bit=False,  # Pas de quantification sur CPU
-            )
-        else:
-            # Pour GPU avec mémoire limitée
-            model = AutoModelForImageTextToText.from_pretrained(
-                self.model_name,
-                torch_dtype=torch.float16,
-                device_map="balanced_low_0",  # Distribution équilibrée
-                load_in_8bit=True,  # Quantification 8-bit pour économiser
-            )
-        
-        return processor, model
-
     def get_llm_output(self, query: str) -> str:
         result = self.pipeline.invoke({"query": query})
         return result.content if hasattr(result, "content") else str(result)
 
+
+
     def parse_llm_output(self, llm_output: str) -> dict:
+        print(llm_output)
         match = re.search(r'\{.*\}', llm_output, re.DOTALL)
         if not match:
             raise ValueError("JSON introuvable dans la sortie")
@@ -83,20 +55,15 @@ class Retriever:
 
     def get_legal_fields(self, source: str):
         legal_fields = []
-        if source == "labor_law":
-            legal_fields.append("droit du travail")
-        elif source == "national_transport":
-            legal_fields.append("droit du transport")
-        elif source == "insurance":
+        if source == "insurance":
             legal_fields.append("droit des assurances")
         elif source == "uemoa":
             legal_fields.append("réglementation uemoa")
         elif source == "ohada":
             legal_fields.append("réglementation ohada")
-        elif source == "digital_legislation":
-            legal_fields.append("droit numérique")
         elif source == "jurisprudence":
             legal_fields.append("jurisprudence")
+            
         return {"legal_field": ", ".join(legal_fields)}
 
     def orchestrator(self, llm_output: str, source: str) -> dict:
@@ -146,7 +113,7 @@ class Retriever:
     def create_retriever_for_source(self, source, top_k: int = 100, similarity_threshold: float = 0.4, expr: str = None):
         vectorstore = self.create_vectorstore(source)
         compressor = DocumentCompressorPipeline(
-             transformers=[EmbeddingsRedundantFilter(embeddings=self.embedding_model, similarity_threshold=1)])
+            transformers=[EmbeddingsRedundantFilter(embeddings=self.embedding_model, similarity_threshold=1)])
         
         retriever = vectorstore.as_retriever(
             search_type="similarity",
@@ -282,7 +249,7 @@ class Retriever:
     def filter_and_prioritize_sources(self, docs: list[Document], top_k: int) -> list[Document]:
             final_docs = []
             jurisprudence_count = 0
-            max_jurisprudence = 7
+            max_jurisprudence = 3
             for doc in docs:
                 is_jurisprudence = 'jurisprudence' in doc.metadata.get('legal_field', '').lower()
                 if is_jurisprudence:
@@ -299,7 +266,6 @@ class Retriever:
         return self.retrieve_docs_from_source(query, source, top_k, similarity_threshold, expr)
     
     async def _retrieve_for_single_source_async(self, query: str, source: str, llm_output: str, top_k: int, similarity_threshold: float) -> list[Document]:
-        print("ok")
         return await asyncio.to_thread(
             self._retrieve_for_single_source,
             query,
@@ -345,6 +311,26 @@ class Retriever:
         return context, docs
 
 
+# def create_llm(
+#     api_key,
+#     model,
+#     temperature,
+#     max_retries,
+#     streaming: bool = False,
+#     callbacks: list = [],
+# ) -> ChatOpenAI:
+#     """Create and configure Azure Chat OpenAI instance."""
+#     return ChatOpenAI(
+#         api_key=api_key,  # type: ignore
+#         model=model,
+#         temperature=temperature,
+#         streaming=streaming,
+#         callbacks=callbacks,
+#     ).with_retry(
+#         wait_exponential_jitter=True,
+#         stop_after_attempt=max_retries,
+#     )  # type: ignore
+
 def create_llm(
     model,
     temperature,
@@ -368,7 +354,7 @@ def answer_chain(
     llm,
     retriever: Retriever,
     similarity_threshold: float = 0.4,
-    top_k: int = 200,
+    top_k: int = 30,
 ) -> tuple[str, list[dict[str, str]]]:
     """Get the chain for the given retriever, prompt, and model."""
 
@@ -418,7 +404,7 @@ async def stream_answer_chain(chain, context, query, docs, streamer_queue):
         # guard to make sure we are not extracting anything from
         # empty queue
 
-        await asyncio.sleep(0.03)
+        await asyncio.sleep(0.0001)
         
     documents = delete_unused_sources(collected_answer, docs)
     yield END_GENERATION_TOKEN + json.dumps({"source": documents})

@@ -14,7 +14,7 @@ COLLECTION_NAMES = {
     "jurisprudence": "jurisprudence"
 }
 
-CONNECTION_ARGS = {"host": venv.get("HOST"), "port": venv.get("PORT")}
+CONNECTION_ARGS = {"db_name": venv.get("ALIAS"), "host": venv.get("HOST"), "port": venv.get("PORT")}
 INDEX_PARAMS = {
     "metric_type": "COSINE",
     "index_type": "HNSW",
@@ -33,6 +33,12 @@ NUM_RETRY = venv.get("NUM_RETRY")
 @dataclass
 class AudioConfig:
     gemma_model_id: str = "google/gemma-3n-e2b-it"
+    
+    # 🔧 AJOUT DES ATTRIBUTS MANQUANTS
+    max_file_size_mb: int = 50
+    download_timeout_seconds: int = 30
+    supported_formats: list = field(default_factory=lambda: ["mp3", "wav", "m4a", "ogg", "flac"])
+    
     audio_params: dict = field(default_factory=lambda: {
         "chunk_length_s": 30,
         "stride_length_s": 5,
